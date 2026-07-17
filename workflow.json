@@ -1,0 +1,40 @@
+{
+  "defaults": {
+    "confidence": 0.8,
+    "timeout": 15,
+    "interval": 0.5,
+    "move_duration": 0.01,
+    "search_dir": "never",
+    "dry_run": false,
+    "show_debug": true,
+    "scale_range": [1.0],
+    "remember": true,
+    "ocr_before": true,
+    "ocr_lang": "lit",
+    "ocr_required": false,
+    "force_ocr": true
+  },
+  "default_workflow": "upload",
+  "workflows": {
+    "upload": [
+      { "type": "find_image", "template": "Screenshot_1.png", "move": true },
+      { "type": "click" },
+      { "type": "wait", "seconds": 2.0 },
+
+      { "type": "find_image", "template": "Screenshot_2.png", "move": true, "confidence": 0.9, "timeout": 20 },
+      { "type": "click" },
+      { "type": "wait", "seconds": 2.0 },
+
+      { "type": "type_text", "text": "https://www.perplexity.ai/" },
+      { "type": "wait", "seconds": 1.0 },
+      { "type": "press_key", "key": "enter" },
+
+      { "type": "find_image", "template": "Screenshot_3.png", "timeout": 20, "move": true, "required": true },
+      { "type": "click" },
+      { "type": "wait", "seconds": 2.0 },
+
+      { "type": "type_text", "text": "{filename}" },
+      { "type": "press_key", "key": "enter" }
+    ]
+  }
+}
