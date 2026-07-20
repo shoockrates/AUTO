@@ -10,7 +10,11 @@
 
     "ocr_max_pages": 8,
 
-    "ocr_dpi": 220
+    "ocr_dpi": 220,
+
+    "ocr_early_stop": true,
+
+    "max_workers": 3
 
   }
 
