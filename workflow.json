@@ -4,17 +4,27 @@
 
     "search_dir": "new_idea",
 
-    "ocr_lang": "eng+lit",
+    "ocr_lang": "eng+lit+rus",
 
     "force_ocr": false,
 
-    "ocr_max_pages": 8,
+    "ocr_max_pages": 5,
 
     "ocr_dpi": 220,
 
     "ocr_early_stop": true,
 
-    "max_workers": 3
+    "max_workers": 1,
+
+    "file_pick_mode": "ALL"
+
+  },
+
+  "ui": {
+
+    "finished_list_max": 0,
+
+    "failed_list_max": 0
 
   }
 
