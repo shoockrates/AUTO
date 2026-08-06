@@ -14,9 +14,13 @@
 
     "ocr_early_stop": true,
 
+    "ocr_out": false,
+
     "max_workers": 1,
 
-    "file_pick_mode": "ALL"
+    "file_pick_mode": "ALL",
+
+    "notifications": false
 
   },
 
