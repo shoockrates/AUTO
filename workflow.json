@@ -2,7 +2,7 @@
 
   "defaults": {
 
-    "search_dir": "new_idea",
+    "search_dir": "SCAN",
 
     "ocr_lang": "eng+lit+rus",
 
