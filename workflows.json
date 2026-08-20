@@ -1,0 +1,24 @@
+{
+  "debug": "FALSE",
+  "workflows": [
+    {
+      "name": "Move to screenshot",
+      "steps": [
+        {
+          "click": "Screenshot_1.png"
+        },
+        {
+          "wait": 1
+        }
+      ]
+    },
+    {
+      "name": "Double-click screenshot",
+      "steps": [
+        {
+          "double_click": "Screenshot_1.png"
+        }
+      ]
+    }
+  ]
+}
