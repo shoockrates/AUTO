@@ -1,17 +1,38 @@
-SELECT
-    c.name AS ColumnName,
-    ty.name AS DataType
+DECLARE @SchemaName sysname = N'dbo';
+DECLARE @TableName  sysname = N'TableName';
+
+DECLARE @FullTableName nvarchar(517) =
+    QUOTENAME(@SchemaName) + N'.' + QUOTENAME(@TableName);
+
+DECLARE @ColumnName sysname;
+DECLARE @Sql nvarchar(max);
+
+DECLARE column_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT c.name
 FROM sys.columns AS c
-JOIN sys.types AS ty
-    ON c.user_type_id = ty.user_type_id
-WHERE c.object_id = OBJECT_ID(N'dbo.TableName')
-  AND (
-       c.name LIKE '%date%'
-    OR c.name LIKE '%time%'
-    OR c.name LIKE '%created%'
-    OR c.name LIKE '%updated%'
-    OR c.name LIKE '%modified%'
-    OR c.name LIKE '%changed%'
-  )
+WHERE c.object_id = OBJECT_ID(@FullTableName)
 ORDER BY c.column_id;
+
+OPEN column_cursor;
+
+FETCH NEXT FROM column_cursor INTO @ColumnName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    PRINT '===== Column: ' + @ColumnName + ' =====';
+
+    SET @Sql = N'
+        SELECT TOP (5)
+            ' + QUOTENAME(@ColumnName) + N' AS [Value]
+        FROM ' + @FullTableName + N'
+        WHERE ' + QUOTENAME(@ColumnName) + N' IS NOT NULL;
+    ';
+
+    EXEC sys.sp_executesql @Sql;
+
+    FETCH NEXT FROM column_cursor INTO @ColumnName;
+END;
+
+CLOSE column_cursor;
+DEALLOCATE column_cursor;
 GO
