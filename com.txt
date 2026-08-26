@@ -1,3 +1,17 @@
-SELECT TOP (20) [ColumnName]
-FROM [dbo].[TableName];
+SELECT TOP (20)
+    s.name AS SchemaName,
+    t.name AS TableName,
+    COUNT(c.column_id) AS ColumnCount
+FROM sys.tables AS t
+JOIN sys.schemas AS s
+    ON t.schema_id = s.schema_id
+JOIN sys.columns AS c
+    ON t.object_id = c.object_id
+GROUP BY
+    s.name,
+    t.name
+ORDER BY
+    ColumnCount DESC,
+    s.name,
+    t.name;
 GO
