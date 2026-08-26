@@ -1,10 +1,14 @@
 SELECT
-    s.name AS SchemaName,
-    t.name AS TableName,
-    t.create_date,
-    t.modify_date
-FROM sys.tables AS t
-JOIN sys.schemas AS s
-    ON s.schema_id = t.schema_id
-WHERE t.name = N'TableName';
+    c.column_id AS ColumnNumber,
+    c.name AS ColumnName,
+    ty.name AS DataType,
+    c.max_length AS MaxLength,
+    c.precision,
+    c.scale,
+    c.is_nullable AS IsNullable
+FROM sys.columns AS c
+JOIN sys.types AS ty
+    ON c.user_type_id = ty.user_type_id
+WHERE c.object_id = OBJECT_ID(N'dbo.TableName')
+ORDER BY c.column_id;
 GO
