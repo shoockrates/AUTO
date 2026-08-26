@@ -1,17 +1,19 @@
-SELECT TOP (20)
-    s.name AS SchemaName,
-    t.name AS TableName,
-    COUNT(c.column_id) AS ColumnCount
-FROM sys.tables AS t
-JOIN sys.schemas AS s
-    ON t.schema_id = s.schema_id
-JOIN sys.columns AS c
-    ON t.object_id = c.object_id
-GROUP BY
-    s.name,
-    t.name
-ORDER BY
-    ColumnCount DESC,
-    s.name,
-    t.name;
+SELECT
+    c.column_id AS ColumnNumber,
+    c.name AS ColumnName,
+    ty.name AS DataType,
+    CASE
+        WHEN c.max_length = -1 THEN 'MAX'
+        WHEN ty.name IN ('nvarchar', 'nchar') THEN CAST(c.max_length / 2 AS varchar(10))
+        ELSE CAST(c.max_length AS varchar(10))
+    END AS MaxLength,
+    c.precision AS PrecisionValue,
+    c.scale AS ScaleValue,
+    CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END AS AllowsNull,
+    CASE WHEN c.is_identity = 1 THEN 'YES' ELSE 'NO' END AS IsIdentity
+FROM sys.columns AS c
+JOIN sys.types AS ty
+    ON c.user_type_id = ty.user_type_id
+WHERE c.object_id = OBJECT_ID(N'dbo.TableName')
+ORDER BY c.column_id;
 GO
