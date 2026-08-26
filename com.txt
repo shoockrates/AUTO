@@ -1,14 +1,8 @@
 SELECT
-    c.column_id AS ColumnNumber,
-    c.name AS ColumnName,
-    ty.name AS DataType,
-    c.max_length AS MaxLength,
-    c.precision,
-    c.scale,
-    c.is_nullable AS IsNullable
-FROM sys.columns AS c
-JOIN sys.types AS ty
-    ON c.user_type_id = ty.user_type_id
-WHERE c.object_id = OBJECT_ID(N'dbo.TableName')
-ORDER BY c.column_id;
+    [ColumnName],
+    COUNT(*) AS Occurrences
+FROM [dbo].[TableName]
+WHERE [ColumnName] IS NOT NULL
+GROUP BY [ColumnName]
+ORDER BY Occurrences DESC;
 GO
