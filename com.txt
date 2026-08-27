@@ -1,1 +1,3 @@
-SELECT TOP 300 * FROM dbo.Registracijos
+SELECT TOP (300) *
+FROM dbo.Registracijos
+ORDER BY Id DESC;
