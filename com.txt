@@ -1,275 +1,674 @@
-<#
-.SYNOPSIS
-    Discover SQL Server instances, pick one interactively, authenticate,
-    list its databases, and generate (optionally run) the matching
-    generate_db_map.py command line.
+"""
+generate_db_map.py — Generate a single, self-contained, navigable HTML file
+that maps a SQL Server database, using sqlcmd.
 
-.DESCRIPTION
-    Combines two discovery methods (sqlcmd -L broadcast + registry scan),
-    presents a numbered menu, handles Windows or SQL auth via Get-Credential
-    (no plaintext password on screen), live-tests the connection, lists
-    databases, lets you pick one, then builds and optionally runs:
+This is a ONE-SHOT generator: it queries the database (capped, so it stays
+usable on a large database), bakes the results into plain HTML, and writes
+out one .html file. After that, no server, no Python, no sqlcmd — just open
+the file in a browser. Re-run the script whenever you want a fresh snapshot.
 
-        python generate_db_map.py --server <server> --database <db> [--auth-type ... --username ...]
+Requires: sqlcmd on PATH (mssql-tools / mssql-tools18).
 
-.NOTES
-    Requires: sqlcmd (SQL Server command line tools) and the SqlServer
-    PowerShell module (or falls back to sqlcmd for the connection test
-    if the module isn't installed).
-#>
+Usage
+-----
+    python generate_db_map.py -S localhost -d MyDatabase --trusted -o db_map.html
+    python generate_db_map.py -S myserver -d MyDatabase -U user -P pass \\
+        --max-tables-per-schema 15 --max-total-tables 60 --max-columns 20 --sample-rows 3
 
-# ---------------------------------------------------------------------------
-# 1. DISCOVERY — sqlcmd -L (network broadcast) + registry (local instances)
-# ---------------------------------------------------------------------------
+Navigation in the generated file
+---------------------------------
+- Schemas and tables are collapsible (<details>/<summary>) — click to expand.
+- A search box filters tables/columns by name as you type.
+- Foreign key rows are clickable links that jump to (and auto-expand) the
+  related table's section.
+- A relationship-map diagram (inline SVG, no JS library) shows every table as
+  a node; hovering highlights its connections, clicking jumps to that table.
+"""
 
-function Get-SqlCmdInstances {
-    Write-Host "Scanning network for SQL Server instances (sqlcmd -L)..." -ForegroundColor Cyan
-    $instances = @()
-    try {
-        $raw = sqlcmd -L 2>$null
-        foreach ($line in $raw) {
-            $line = $line.Trim()
-            # sqlcmd -L output lines look like: "MACHINENAME\INSTANCENAME" or "MACHINENAME"
-            if ($line -and $line -notmatch "Servers:" -and $line -notmatch "^-+$") {
-                $instances += $line
-            }
-        }
-    }
-    catch {
-        Write-Host "  sqlcmd -L failed or is unavailable: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-    return $instances | Sort-Object -Unique
-}
+import argparse
+import html
+import math
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
-function Get-RegistryInstances {
-    Write-Host "Scanning registry for locally-installed SQL Server instances..." -ForegroundColor Cyan
-    $instances = @()
 
-    $regPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server\Instance Names\SQL"
+# --------------------------------------------------------------------------
+# sqlcmd execution
+# --------------------------------------------------------------------------
+
+class SqlCmdError(RuntimeError):
+    pass
+
+
+class SqlCmdRunner:
+    SEP = "\x1f"
+
+    def __init__(self, server, database, trusted, username, password, timeout=30):
+        self.server = server
+        self.database = database
+        self.trusted = trusted
+        self.username = username
+        self.password = password
+        self.timeout = timeout
+
+    def _base_args(self) -> List[str]:
+        args = ["sqlcmd", "-S", self.server, "-d", self.database]
+        if self.trusted:
+            args.append("-E")
+        else:
+            if not self.username or not self.password:
+                raise SqlCmdError("Username and password required when --trusted is not used.")
+            args += ["-U", self.username, "-P", self.password]
+        # -h -1 means "print no headers at all" (not "print headers on row 1").
+        # IMPORTANT: because of this, every row returned by query() below is a
+        # real DATA row — none of it is a header row to be stripped off.
+        args += ["-h", "-1", "-W", "-s", self.SEP, "-C"]
+        return args
+
+    def query(self, sql: str) -> List[List[str]]:
+        """Run a query and return every result row as a list of trimmed cell
+        strings. With -h -1, sqlcmd emits NO header row and NO dashed
+        underline row — only data rows and a trailing "(N rows affected)"
+        summary line, which is filtered out below. Callers must NOT treat
+        the first returned row as a header; there isn't one."""
+        args = self._base_args() + ["-Q", sql]
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
+        except FileNotFoundError:
+            raise SqlCmdError("sqlcmd not found on PATH. Install mssql-tools / mssql-tools18 first.")
+        except subprocess.TimeoutExpired:
+            raise SqlCmdError(f"sqlcmd timed out after {self.timeout}s.")
+
+        if proc.returncode != 0:
+            raise SqlCmdError(f"sqlcmd failed:\n{proc.stderr.strip()}")
+
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip() != ""]
+        lines = [ln for ln in lines if "rows affected" not in ln.lower()]
+        rows = [line.split(self.SEP) for line in lines]
+        return [[cell.strip() for cell in row] for row in rows]
+
+
+def esc_sql(s: str) -> str:
+    return s.replace("'", "''")
+
+
+# --------------------------------------------------------------------------
+# Data model
+# --------------------------------------------------------------------------
+
+@dataclass
+class ForeignKey:
+    fk_name: str
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+
+
+@dataclass
+class TableData:
+    schema: str
+    name: str
+    row_count: Optional[int] = None
+    columns: List[Tuple[str, str, str, str]] = None
+    sample_header: List[str] = None
+    sample_rows: List[List[str]] = None
+    fk_out: List[ForeignKey] = None
+    fk_in: List[ForeignKey] = None
+    error: Optional[str] = None
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.schema}.{self.name}"
+
+    @property
+    def anchor_id(self) -> str:
+        return f"tbl-{self.schema}-{self.name}".replace(" ", "_")
+
+
+# --------------------------------------------------------------------------
+# Data collection (runs once, up front, with caps)
+# --------------------------------------------------------------------------
+
+class DatabaseSnapshot:
+    def __init__(self, runner: SqlCmdRunner, max_tables_per_schema: int, max_total_tables: int,
+                 max_columns: int, sample_rows: int, schema_filter: Optional[List[str]] = None):
+        self.runner = runner
+        self.max_tables_per_schema = max_tables_per_schema
+        self.max_total_tables = max_total_tables
+        self.max_columns = max_columns
+        self.sample_rows = sample_rows
+        self.schema_filter = schema_filter
+
+    def list_schemas(self) -> List[str]:
+        sql = """
+        SET NOCOUNT ON;
+        SELECT DISTINCT TABLE_SCHEMA
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_SCHEMA;
+        """
+        rows = self.runner.query(sql)
+        # FIX: every row here is real data (see SqlCmdRunner.query docstring) —
+        # do NOT discard rows[0] as a header.
+        schemas = [r[0] for r in rows if r and r[0]]
+        if self.schema_filter:
+            wanted = {s.lower() for s in self.schema_filter}
+            schemas = [s for s in schemas if s.lower() in wanted]
+        return schemas
+
+    def list_tables(self, schema: str) -> List[str]:
+        sql = f"""
+        SET NOCOUNT ON;
+        SELECT TOP {self.max_tables_per_schema} TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{esc_sql(schema)}'
+        ORDER BY TABLE_NAME;
+        """
+        rows = self.runner.query(sql)
+        return [r[0] for r in rows if r and r[0]]
+
+    def fill_table(self, schema: str, name: str) -> TableData:
+        t = TableData(schema=schema, name=name, columns=[], sample_header=[], sample_rows=[],
+                      fk_out=[], fk_in=[])
+        try:
+            t.row_count = self._row_count(schema, name)
+            t.columns = self._columns(schema, name)
+            t.sample_header, t.sample_rows = self._sample_rows(schema, name)
+            t.fk_out = self._fks(schema, name, direction="out")
+            t.fk_in = self._fks(schema, name, direction="in")
+        except SqlCmdError as exc:
+            t.error = str(exc)
+        return t
+
+    def _row_count(self, schema, name) -> Optional[int]:
+        sql = f"""
+        SET NOCOUNT ON;
+        SELECT SUM(p.rows)
+        FROM sys.partitions p
+        JOIN sys.tables t ON t.object_id = p.object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE t.name = '{esc_sql(name)}' AND s.name = '{esc_sql(schema)}'
+          AND p.index_id IN (0, 1);
+        """
+        rows = self.runner.query(sql)
+        try:
+            if rows and rows[0] and rows[0][0].strip().isdigit():
+                return int(rows[0][0])
+        except Exception:
+            pass
+        return None
+
+    def _columns(self, schema, name) -> List[Tuple[str, str, str, str]]:
+        sql = f"""
+        SET NOCOUNT ON;
+        SELECT TOP {self.max_columns}
+            COLUMN_NAME, DATA_TYPE,
+            ISNULL(CAST(CHARACTER_MAXIMUM_LENGTH AS VARCHAR(10)), '-'),
+            IS_NULLABLE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{esc_sql(schema)}' AND TABLE_NAME = '{esc_sql(name)}'
+        ORDER BY ORDINAL_POSITION;
+        """
+        rows = self.runner.query(sql)
+        return [tuple(r) for r in rows if len(r) >= 4]
+
+    def _column_names(self, schema, name) -> List[str]:
+        """Full, uncapped column-name list in physical column order — used as
+        the header for sample rows, since sqlcmd (-h -1) never prints one."""
+        sql = f"""
+        SET NOCOUNT ON;
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{esc_sql(schema)}' AND TABLE_NAME = '{esc_sql(name)}'
+        ORDER BY ORDINAL_POSITION;
+        """
+        rows = self.runner.query(sql)
+        return [r[0] for r in rows if r and r[0]]
+
+    def _sample_rows(self, schema, name) -> Tuple[List[str], List[List[str]]]:
+        if self.sample_rows <= 0:
+            return [], []
+        sql = f"""
+        SET NOCOUNT ON;
+        SELECT TOP {self.sample_rows} * FROM [{schema}].[{name}];
+        """
+        rows = self.runner.query(sql)
+        if not rows:
+            return [], []
+
+        # FIX: previously this tried to pull the header out of `rows[0]`,
+        # which doesn't exist because sqlcmd is run with -h -1 (no headers).
+        # That silently ate the first sample row and produced garbage
+        # column names. Get real column names from INFORMATION_SCHEMA instead.
+        header = self._column_names(schema, name)
+        width = len(rows[0])
+        if len(header) != width:
+            # Defensive fallback (e.g. computed columns/odd edge cases) so a
+            # mismatch never crashes rendering — just label generically.
+            header = [f"col{i + 1}" for i in range(width)]
+        return header, rows
+
+    def _fks(self, schema, name, direction) -> List[ForeignKey]:
+        if direction == "out":
+            where = f"sp.name = '{esc_sql(schema)}' AND tp.name = '{esc_sql(name)}'"
+        else:
+            where = f"sr.name = '{esc_sql(schema)}' AND tr.name = '{esc_sql(name)}'"
+        sql = f"""
+        SET NOCOUNT ON;
+        SELECT fk.name, sp.name, tp.name, cp.name, sr.name, tr.name, cr.name
+        FROM sys.foreign_keys fk
+        JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+        JOIN sys.tables tp ON tp.object_id = fk.parent_object_id
+        JOIN sys.schemas sp ON sp.schema_id = tp.schema_id
+        JOIN sys.columns cp ON cp.object_id = tp.object_id AND cp.column_id = fkc.parent_column_id
+        JOIN sys.tables tr ON tr.object_id = fk.referenced_object_id
+        JOIN sys.schemas sr ON sr.schema_id = tr.schema_id
+        JOIN sys.columns cr ON cr.object_id = tr.object_id AND cr.column_id = fkc.referenced_column_id
+        WHERE {where};
+        """
+        rows = self.runner.query(sql)
+        result = []
+        for r in rows:
+            if len(r) < 7:
+                continue
+            fk_name, sp_, tp_, cp_, sr_, tr_, cr_ = r
+            result.append(ForeignKey(fk_name, f"{sp_}.{tp_}", cp_, f"{sr_}.{tr_}", cr_))
+        return result
+
+    def build(self) -> "Dict[str, List[TableData]]":
+        """Returns {schema: [TableData, ...]}, respecting the overall table cap."""
+        result: Dict[str, List[TableData]] = {}
+        total = 0
+        for schema in self.list_schemas():
+            if total >= self.max_total_tables:
+                break
+            table_names = self.list_tables(schema)
+            tables = []
+            for name in table_names:
+                if total >= self.max_total_tables:
+                    break
+                print(f"  querying {schema}.{name} ...")
+                tables.append(self.fill_table(schema, name))
+                total += 1
+            result[schema] = tables
+        return result
+
+
+# --------------------------------------------------------------------------
+# Static HTML rendering
+# --------------------------------------------------------------------------
+
+def h(s) -> str:
+    return html.escape(str(s), quote=True)
+
+
+def anchor_for(full_name: str) -> str:
+    schema, name = full_name.split(".", 1)
+    return f"tbl-{schema}-{name}".replace(" ", "_")
+
+
+def render_table_section(t: TableData) -> str:
+    parts = [f'<details class="table" id="{h(t.anchor_id)}" data-name="{h(t.full_name.lower())}">']
+    row_count_str = f"{t.row_count:,} rows (approx.)" if t.row_count is not None else "row count unknown"
+    parts.append(f'<summary><span class="tname">{h(t.name)}</span> '
+                 f'<span class="badge">{h(row_count_str)}</span></summary>')
+    parts.append('<div class="table-body">')
+
+    if t.error:
+        parts.append(f'<div class="error">⚠️ {h(t.error)}</div>')
+
+    parts.append('<div class="section-title">Columns</div>')
+    if not t.columns:
+        parts.append('<div class="empty">No column info</div>')
+    else:
+        parts.append('<table><tr><th>Name</th><th>Type</th><th>Max Length</th><th>Nullable</th></tr>')
+        for name, dtype, maxlen, nullable in t.columns:
+            parts.append(f'<tr class="col-row" data-name="{h(name.lower())}">'
+                         f'<td>{h(name)}</td><td>{h(dtype)}</td><td>{h(maxlen)}</td><td>{h(nullable)}</td></tr>')
+        parts.append('</table>')
+
+    parts.append('<div class="section-title">Sample rows</div>')
+    if not t.sample_header:
+        parts.append('<div class="empty">No data / could not query table</div>')
+    else:
+        parts.append('<div class="scrollx"><table><tr>' +
+                     ''.join(f'<th>{h(c)}</th>' for c in t.sample_header) + '</tr>')
+        for row in t.sample_rows:
+            parts.append('<tr>' + ''.join(f'<td>{h(c)}</td>' for c in row) + '</tr>')
+        parts.append('</table></div>')
+
+    parts.append('<div class="section-title">Foreign keys — outgoing (this table references)</div>')
+    if not t.fk_out:
+        parts.append('<div class="empty">None</div>')
+    else:
+        for fk in t.fk_out:
+            target = anchor_for(fk.to_table)
+            parts.append(
+                f'<a class="fk-row" href="#{h(target)}">'
+                f'{h(fk.from_column)} &rarr; {h(fk.to_table)}.{h(fk.to_column)} '
+                f'<span class="badge">{h(fk.fk_name)}</span></a>'
+            )
+
+    parts.append('<div class="section-title">Foreign keys — incoming (referenced by)</div>')
+    if not t.fk_in:
+        parts.append('<div class="empty">None</div>')
+    else:
+        for fk in t.fk_in:
+            source = anchor_for(fk.from_table)
+            parts.append(
+                f'<a class="fk-row" href="#{h(source)}">'
+                f'{h(fk.from_table)}.{h(fk.from_column)} &rarr; {h(fk.to_column)} '
+                f'<span class="badge">{h(fk.fk_name)}</span></a>'
+            )
+
+    parts.append('</div>')  # table-body
+    parts.append('</details>')
+    return "\n".join(parts)
+
+
+def render_schema_section(schema: str, tables: List[TableData]) -> str:
+    parts = [f'<details class="schema" open><summary class="sname">{h(schema)} '
+             f'<span class="badge">{len(tables)} tables shown</span></summary>']
+    parts.append('<div class="schema-body">')
+    for t in tables:
+        parts.append(render_table_section(t))
+    parts.append('</div>')
+    parts.append('</details>')
+    return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------
+# Relationship diagram (inline SVG, computed layout, no external library)
+# --------------------------------------------------------------------------
+
+def assign_schema_colors(schemas: List[str]) -> Dict[str, str]:
+    """Evenly spaced hues around the color wheel, one per schema."""
+    n = max(len(schemas), 1)
+    return {s: f"hsl({int(360 * i / n)}, 65%, 58%)" for i, s in enumerate(schemas)}
+
+
+def compute_positions(full_names: List[str]) -> Tuple[Dict[str, Tuple[float, float]], float, float]:
+    """Deterministic circular layout — no graph-layout library available, but this
+    guarantees zero node-overlap and scales cleanly with table count."""
+    n = len(full_names)
+    if n == 0:
+        return {}, 400.0, 400.0
+    radius = max(160.0, n * 15.0)
+    size = radius * 2 + 180.0
+    center = size / 2
+    positions = {}
+    for i, name in enumerate(full_names):
+        angle = 2 * math.pi * i / n
+        positions[name] = (center + radius * math.cos(angle), center + radius * math.sin(angle))
+    return positions, size, size
+
+
+def render_diagram(schema_map: Dict[str, List[TableData]]) -> str:
+    all_tables = [t for tables in schema_map.values() for t in tables]
+    full_names = [t.full_name for t in all_tables]
+    included = set(full_names)
+    if not full_names:
+        return '<div class="empty">No tables to diagram.</div>'
+
+    positions, width, height = compute_positions(full_names)
+    schema_colors = assign_schema_colors(list(schema_map.keys()))
+
+    # De-duplicate edges (a composite FK can otherwise produce repeated pairs).
+    seen = set()
+    edges = []
+    for t in all_tables:
+        for fk in (t.fk_out or []):
+            if fk.to_table in included and fk.to_table != t.full_name:
+                key = (t.full_name, fk.to_table, fk.fk_name)
+                if key not in seen:
+                    seen.add(key)
+                    edges.append((t.full_name, fk.to_table, fk.fk_name))
+
+    svg = [f'<svg viewBox="0 0 {width:.0f} {height:.0f}" class="relmap" xmlns="http://www.w3.org/2000/svg">']
+    svg.append(
+        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" '
+        'markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b9dff">'
+        '</path></marker></defs>'
     )
 
-    foreach ($path in $regPaths) {
-        if (Test-Path $path) {
-            try {
-                $props = Get-ItemProperty -Path $path -ErrorAction Stop
-                foreach ($prop in $props.PSObject.Properties) {
-                    # Skip PowerShell's own metadata properties
-                    if ($prop.Name -notmatch '^PS') {
-                        $instanceName = $prop.Name
-                        if ($instanceName -eq "MSSQLSERVER") {
-                            $instances += $env:COMPUTERNAME
-                        }
-                        else {
-                            $instances += "$($env:COMPUTERNAME)\$instanceName"
-                        }
-                    }
-                }
-            }
-            catch {
-                # Path existed but read failed; ignore and continue
-            }
-        }
-    }
+    # Edges drawn first so nodes sit visually on top of them.
+    for src, dst, fk_name in edges:
+        x1, y1 = positions[src]
+        x2, y2 = positions[dst]
+        a_src, a_dst = anchor_for(src), anchor_for(dst)
+        svg.append(
+            f'<line class="edge" data-a="{h(a_src)}" data-b="{h(a_dst)}" '
+            f'x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" marker-end="url(#arrow)">'
+            f'<title>{h(fk_name)}: {h(src)} &rarr; {h(dst)}</title></line>'
+        )
 
-    return $instances | Sort-Object -Unique
-}
+    # Nodes.
+    for name in full_names:
+        x, y = positions[name]
+        schema = name.split(".", 1)[0]
+        color = schema_colors.get(schema, "#5b9dff")
+        anchor = anchor_for(name)
+        table_only = name.split(".", 1)[1] if "." in name else name
+        svg.append(
+            f'<a href="#{h(anchor)}" class="node-link">'
+            f'<g class="node" data-anchor="{h(anchor)}">'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="{color}"></circle>'
+            f'<text x="{x:.1f}" y="{(y - 11):.1f}" text-anchor="middle" class="node-label">{h(table_only)}</text>'
+            f'<title>{h(name)}</title>'
+            f'</g></a>'
+        )
 
-function Get-AllSqlInstances {
-    $fromSqlCmd  = Get-SqlCmdInstances
-    $fromRegistry = Get-RegistryInstances
+    svg.append('</svg>')
+    return "\n".join(svg)
 
-    $combined = @($fromSqlCmd + $fromRegistry) | Where-Object { $_ } | Sort-Object -Unique
-    return $combined
-}
 
-# ---------------------------------------------------------------------------
-# 2. MENU — let the user pick a server
-# ---------------------------------------------------------------------------
+PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Database map — {database}</title>
+<style>
+  :root {{
+    --bg:#0f1115; --panel:#171a21; --border:#2a2f3a; --text:#e6e8eb;
+    --muted:#9aa3af; --accent:#5b9dff; --accent-dim:#1c2b40; --danger:#ff6b6b;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+          background:var(--bg); color:var(--text); font-size:14px; }}
+  header {{ position: sticky; top:0; z-index:10; padding:12px 18px; background:var(--panel);
+            border-bottom:1px solid var(--border); }}
+  header h1 {{ margin:0 0 4px; font-size:16px; }}
+  header .caps {{ color:var(--muted); font-size:12px; }}
+  #search {{ width:100%; max-width:420px; margin-top:8px; padding:8px 10px; background:#10131a;
+             border:1px solid var(--border); border-radius:6px; color:var(--text); }}
+  main {{ padding: 14px 18px 60px; max-width: 1100px; margin: 0 auto; }}
+  details.schema {{ margin-bottom: 14px; border:1px solid var(--border); border-radius:8px;
+                     background: var(--panel); }}
+  details.schema > summary.sname {{ padding:10px 14px; cursor:pointer; font-weight:600; font-size:15px; }}
+  .schema-body {{ padding: 4px 14px 14px; }}
+  details.table {{ border:1px solid var(--border); border-radius:6px; margin:8px 0; background:#12151b; }}
+  details.table > summary {{ padding:8px 12px; cursor:pointer; }}
+  .tname {{ font-weight:600; }}
+  .table-body {{ padding: 6px 14px 14px; }}
+  table {{ border-collapse:collapse; width:100%; margin:6px 0 14px; font-size:13px; }}
+  th, td {{ text-align:left; padding:5px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }}
+  th {{ color:var(--muted); }}
+  .scrollx {{ overflow-x:auto; }}
+  .section-title {{ font-size:13px; font-weight:600; margin:14px 0 4px; color:var(--accent); }}
+  .badge {{ display:inline-block; background:#1f2430; color:var(--muted); padding:1px 8px;
+            border-radius:10px; font-size:11px; margin-left:6px; }}
+  .fk-row {{ display:block; padding:6px 8px; border-radius:6px; border:1px solid var(--border);
+             margin-bottom:5px; color:var(--text); text-decoration:none; }}
+  .fk-row:hover {{ border-color:var(--accent); background:#1f2430; }}
+  .empty {{ color:var(--muted); font-style:italic; padding:4px 0; }}
+  .error {{ color:var(--danger); padding:4px 0; }}
+  details.table:target, details.table.js-target {{ outline: 2px solid var(--accent); }}
+  .hidden {{ display:none !important; }}
 
-function Select-SqlInstance {
-    param([string[]]$Instances)
+  .diagram-wrap {{ overflow:auto; border:1px solid var(--border); border-radius:8px;
+                    background:#0c0e13; padding:10px; margin-bottom:16px; }}
+  svg.relmap {{ width:100%; height:auto; min-width:640px; display:block; }}
+  svg.relmap .edge {{ stroke:#3a4152; stroke-width:1.3; transition: stroke .15s, opacity .15s; }}
+  svg.relmap .edge.hi {{ stroke:#5b9dff; stroke-width:2.2; }}
+  svg.relmap .edge.dim {{ opacity:.10; }}
+  .node-label {{ font-size:9px; fill:var(--text); pointer-events:none; }}
+  .node-link {{ cursor:pointer; }}
+  .node-link:hover .node-label {{ fill:var(--accent); font-weight:600; }}
+  .node-link:hover circle {{ stroke:#fff; stroke-width:2; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>Database map: {database}</h1>
+  <div class="caps">Static snapshot — generated once via sqlcmd. Max {max_total_tables} tables total
+  ({max_tables_per_schema}/schema), {max_columns} columns/table, {sample_rows} sample rows/table.
+  Re-run the generator for a fresh snapshot.</div>
+  <input id="search" type="text" placeholder="Filter tables / columns by name…">
+</header>
+<main>
+<details class="schema" open>
+  <summary class="sname">Relationship map <span class="badge">hover to highlight, click to jump</span></summary>
+  <div class="schema-body"><div class="diagram-wrap">{diagram}</div></div>
+</details>
+{body}
+</main>
+<script>
+  // Pure client-side filter over the already-embedded static data — no network calls.
+  const search = document.getElementById('search');
+  search.addEventListener('input', () => {{
+    const q = search.value.trim().toLowerCase();
+    document.querySelectorAll('details.table').forEach(tableEl => {{
+      const tableName = tableEl.getAttribute('data-name') || '';
+      const colMatches = Array.from(tableEl.querySelectorAll('.col-row'))
+        .some(row => (row.getAttribute('data-name') || '').includes(q));
+      const matches = q === '' || tableName.includes(q) || colMatches;
+      tableEl.classList.toggle('hidden', !matches);
+      if (matches && q !== '') tableEl.open = true;
+    }});
+    document.querySelectorAll('details.schema').forEach(schemaEl => {{
+      const anyVisible = Array.from(schemaEl.querySelectorAll('details.table'))
+        .some(t => !t.classList.contains('hidden'));
+      schemaEl.classList.toggle('hidden', !anyVisible);
+    }});
+  }});
 
-    if ($Instances.Count -eq 0) {
-        Write-Host "No instances found automatically." -ForegroundColor Yellow
-        $manual = Read-Host "Enter a SQL Server instance name manually (e.g. SERVER\INSTANCE)"
-        return $manual
-    }
+  // When landing on a #tbl-... anchor (including via FK jump links), make sure
+  // the target (and its parent schema) are expanded, and give it a visible highlight.
+  function openTarget() {{
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (!id) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.open = true;
+    let parent = el.closest('details.schema');
+    if (parent) parent.open = true;
+    document.querySelectorAll('.js-target').forEach(e => e.classList.remove('js-target'));
+    el.classList.add('js-target');
+    el.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+  }}
+  window.addEventListener('hashchange', openTarget);
+  window.addEventListener('DOMContentLoaded', openTarget);
 
-    Write-Host "`nDiscovered SQL Server instances:" -ForegroundColor Green
-    for ($i = 0; $i -lt $Instances.Count; $i++) {
-        Write-Host "  [$($i + 1)] $($Instances[$i])"
-    }
-    Write-Host "  [$($Instances.Count + 1)] Enter manually"
+  // Relationship-map hover highlighting: hovering a node dims unrelated edges
+  // and highlights the ones touching it. Pure DOM, no charting library.
+  document.querySelectorAll('.node-link').forEach(nodeLink => {{
+    const g = nodeLink.querySelector('.node');
+    const anchor = g.getAttribute('data-anchor');
+    nodeLink.addEventListener('mouseenter', () => {{
+      document.querySelectorAll('svg.relmap .edge').forEach(edge => {{
+        const isConnected = edge.getAttribute('data-a') === anchor || edge.getAttribute('data-b') === anchor;
+        edge.classList.toggle('hi', isConnected);
+        edge.classList.toggle('dim', !isConnected);
+      }});
+    }});
+    nodeLink.addEventListener('mouseleave', () => {{
+      document.querySelectorAll('svg.relmap .edge').forEach(edge => {{
+        edge.classList.remove('hi', 'dim');
+      }});
+    }});
+  }});
+</script>
+</body>
+</html>
+"""
 
-    do {
-        $choice = Read-Host "`nSelect a server by number"
-        $valid = ($choice -as [int]) -and ([int]$choice -ge 1) -and ([int]$choice -le ($Instances.Count + 1))
-        if (-not $valid) { Write-Host "Invalid choice, try again." -ForegroundColor Red }
-    } while (-not $valid)
 
-    $choiceIndex = [int]$choice
-    if ($choiceIndex -eq ($Instances.Count + 1)) {
-        return Read-Host "Enter the instance name manually"
-    }
-    return $Instances[$choiceIndex - 1]
-}
-
-# ---------------------------------------------------------------------------
-# 3. AUTH — Windows or SQL auth, credential collected securely
-# ---------------------------------------------------------------------------
-
-function Get-SqlAuthChoice {
-    Write-Host "`nAuthentication type:" -ForegroundColor Green
-    Write-Host "  [1] Windows Authentication (current user)"
-    Write-Host "  [2] SQL Server Authentication (username/password)"
-
-    do {
-        $choice = Read-Host "Select auth type"
-    } while ($choice -notin @("1", "2"))
-
-    if ($choice -eq "1") {
-        return @{ AuthType = "windows"; Credential = $null }
-    }
-    else {
-        # Get-Credential never echoes the password to the console
-        $cred = Get-Credential -Message "Enter SQL Server login credentials"
-        return @{ AuthType = "sql"; Credential = $cred }
-    }
-}
-
-# ---------------------------------------------------------------------------
-# 4. CONNECTION TEST + DATABASE LISTING
-# ---------------------------------------------------------------------------
-
-function Test-SqlConnectionAndListDatabases {
-    param(
-        [string]$ServerInstance,
-        [hashtable]$AuthInfo
+def render_page(database: str, schema_map: Dict[str, List[TableData]], args) -> str:
+    body = "\n".join(render_schema_section(schema, tables) for schema, tables in schema_map.items())
+    if not schema_map:
+        body = '<div class="empty">No schemas/tables matched.</div>'
+    diagram = render_diagram(schema_map)
+    return PAGE_TEMPLATE.format(
+        database=h(database),
+        body=body,
+        diagram=diagram,
+        max_total_tables=args.max_total_tables,
+        max_tables_per_schema=args.max_tables_per_schema,
+        max_columns=args.max_columns,
+        sample_rows=args.sample_rows,
     )
 
-    $query = "SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name;"  # skip system DBs
 
-    try {
-        if (Get-Module -ListAvailable -Name SqlServer) {
-            Import-Module SqlServer -ErrorAction Stop
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
 
-            if ($AuthInfo.AuthType -eq "windows") {
-                $result = Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $query -ErrorAction Stop
-            }
-            else {
-                $plainUser = $AuthInfo.Credential.UserName
-                $plainPass = $AuthInfo.Credential.GetNetworkCredential().Password
-                $result = Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $query `
-                    -Username $plainUser -Password $plainPass -ErrorAction Stop
-            }
-            $databases = $result | ForEach-Object { $_.name }
-        }
-        else {
-            # Fallback: raw sqlcmd.exe if the SqlServer module isn't installed
-            if ($AuthInfo.AuthType -eq "windows") {
-                $raw = sqlcmd -S $ServerInstance -E -Q $query -h -1 2>&1
-            }
-            else {
-                $plainUser = $AuthInfo.Credential.UserName
-                $plainPass = $AuthInfo.Credential.GetNetworkCredential().Password
-                $raw = sqlcmd -S $ServerInstance -U $plainUser -P $plainPass -Q $query -h -1 2>&1
-            }
-            if ($LASTEXITCODE -ne 0) { throw "sqlcmd returned exit code $LASTEXITCODE : $raw" }
-            $databases = $raw | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch "rows affected" }
-        }
+def parse_args(argv=None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Generate a static, navigable HTML map of a SQL Server database.")
+    p.add_argument("-S", "--server", required=True, help="Server name/host")
+    p.add_argument("-d", "--database", required=True, help="Database name")
+    p.add_argument("--trusted", action="store_true", help="Use Windows/trusted authentication")
+    p.add_argument("-U", "--username", help="SQL auth username")
+    p.add_argument("-P", "--password", help="SQL auth password")
 
-        return @{ Success = $true; Databases = $databases }
-    }
-    catch {
-        return @{ Success = $false; Error = $_.Exception.Message }
-    }
-}
+    p.add_argument("--schemas", help="Comma-separated list of schemas to include (default: all)")
+    p.add_argument("--max-tables-per-schema", type=int, default=15, help="Max tables per schema (default: 15)")
+    p.add_argument("--max-total-tables", type=int, default=60, help="Hard cap on total tables across all schemas (default: 60)")
+    p.add_argument("--max-columns", type=int, default=25, help="Max columns per table (default: 25)")
+    p.add_argument("--sample-rows", type=int, default=3, help="Sample rows per table, 0 to skip (default: 3)")
+    p.add_argument("--timeout", type=int, default=30, help="Per-query timeout in seconds (default: 30)")
+    p.add_argument("-o", "--output", default="db_map.html", help="Output HTML file path (default: db_map.html)")
+    return p.parse_args(argv)
 
-# ---------------------------------------------------------------------------
-# 5. COMMAND GENERATION + OPTIONAL EXECUTION
-# ---------------------------------------------------------------------------
 
-function New-GenerateDbMapCommand {
-    param(
-        [string]$ServerInstance,
-        [string]$Database,
-        [hashtable]$AuthInfo
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    schema_filter = [s.strip() for s in args.schemas.split(",")] if args.schemas else None
+
+    runner = SqlCmdRunner(
+        server=args.server, database=args.database, trusted=args.trusted,
+        username=args.username, password=args.password, timeout=args.timeout,
+    )
+    snapshot = DatabaseSnapshot(
+        runner=runner,
+        max_tables_per_schema=args.max_tables_per_schema,
+        max_total_tables=args.max_total_tables,
+        max_columns=args.max_columns,
+        sample_rows=args.sample_rows,
+        schema_filter=schema_filter,
     )
 
-    if ($AuthInfo.AuthType -eq "windows") {
-        $cmd = "python generate_db_map.py --server `"$ServerInstance`" --database `"$Database`" --auth-type windows"
-    }
-    else {
-        $user = $AuthInfo.Credential.UserName
-        $cmd = "python generate_db_map.py --server `"$ServerInstance`" --database `"$Database`" --auth-type sql --username `"$user`" --password `"<hidden>`""
-    }
-    return $cmd
-}
+    print(f"Querying '{args.database}' via sqlcmd (capped at {args.max_total_tables} tables total)...")
+    try:
+        schema_map = snapshot.build()
+    except SqlCmdError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
+    html_out = render_page(args.database, schema_map, args)
 
-function Main {
-    $instances = Get-AllSqlInstances
-    $server = Select-SqlInstance -Instances $instances
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(html_out)
 
-    $authInfo = Get-SqlAuthChoice
+    total_tables = sum(len(v) for v in schema_map.values())
+    print(f"Done. Wrote {args.output} ({total_tables} tables across {len(schema_map)} schemas).")
+    print(f"Open it directly in a browser: file://{os.path.abspath(args.output)}")
+    return 0
 
-    Write-Host "`nTesting connection to '$server'..." -ForegroundColor Cyan
-    $test = Test-SqlConnectionAndListDatabases -ServerInstance $server -AuthInfo $authInfo
 
-    if (-not $test.Success) {
-        Write-Host "Connection failed: $($test.Error)" -ForegroundColor Red
-        return
-    }
-
-    if ($test.Databases.Count -eq 0) {
-        Write-Host "Connected successfully, but no user databases were found." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "`nDatabases on '$server':" -ForegroundColor Green
-    for ($i = 0; $i -lt $test.Databases.Count; $i++) {
-        Write-Host "  [$($i + 1)] $($test.Databases[$i])"
-    }
-
-    do {
-        $dbChoice = Read-Host "`nSelect a database by number"
-        $valid = ($dbChoice -as [int]) -and ([int]$dbChoice -ge 1) -and ([int]$dbChoice -le $test.Databases.Count)
-        if (-not $valid) { Write-Host "Invalid choice, try again." -ForegroundColor Red }
-    } while (-not $valid)
-
-    $database = $test.Databases[[int]$dbChoice - 1]
-
-    $command = New-GenerateDbMapCommand -ServerInstance $server -Database $database -AuthInfo $authInfo
-
-    Write-Host "`nGenerated command:" -ForegroundColor Green
-    Write-Host "  $command`n" -ForegroundColor White
-
-    if ($authInfo.AuthType -eq "sql") {
-        Write-Host "Note: the printed command shows '<hidden>' for the password." -ForegroundColor Yellow
-        Write-Host "If you run it now, the real password is substituted automatically." -ForegroundColor Yellow
-    }
-
-    $runNow = Read-Host "Run this command now? (y/N)"
-    if ($runNow -match '^[Yy]') {
-        if ($authInfo.AuthType -eq "sql") {
-            $plainUser = $authInfo.Credential.UserName
-            $plainPass = $authInfo.Credential.GetNetworkCredential().Password
-            $execCommand = "python generate_db_map.py --server `"$server`" --database `"$database`" --auth-type sql --username `"$plainUser`" --password `"$plainPass`""
-        }
-        else {
-            $execCommand = "python generate_db_map.py --server `"$server`" --database `"$database`" --auth-type windows"
-        }
-        Write-Host "`nRunning..." -ForegroundColor Cyan
-        Invoke-Expression $execCommand
-    }
-    else {
-        Write-Host "Skipped execution. Copy the command above when you're ready to run it." -ForegroundColor Cyan
-    }
-}
-
-Main
+if __name__ == "__main__":
+    sys.exit(main())
