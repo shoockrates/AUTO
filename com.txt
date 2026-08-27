@@ -1,2 +1,1 @@
-000
-
+SELECT TOP 300 * FROM dbo.Registracijos
