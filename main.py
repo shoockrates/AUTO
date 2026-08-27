@@ -1,27 +1,18 @@
-# vm_sender.py
 import socket
 
-DEST_IP = 'x.x.x.x'  # destination's public IP
+HOST = '0.0.0.0'
 PORT = 9999
 
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.settimeout(10)
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.bind((HOST, PORT))
+server.listen(1)
+print(f"Listening on port {PORT}...")
 
-try:
-    client.connect((DEST_IP, PORT))
-    print(f"✓ Connected to {DEST_IP}:{PORT}")
+conn, addr = server.accept()
+print(f"Connected by {addr}")
 
-    client.sendall(b"hello")
-    print("✓ Sent: hello")
+data = conn.recv(1024)
+print(f"Received: {data.decode()}")
 
-    response = client.recv(1024)
-    print(f"✓ Destination replied: {response.decode()}")
-
-except socket.timeout:
-    print("✗ Connection timed out — VM likely has no direct outbound path to destination (blocked or routed only through VPN)")
-except ConnectionRefusedError:
-    print("✗ Connection refused — port may be closed on destination, or a firewall is blocking it")
-except Exception as e:
-    print(f"✗ Failed: {e}")
-finally:
-    client.close()
+conn.sendall(b"ack: got your message")
+conn.close()
