@@ -638,6 +638,58 @@ A standalone navigate step still means "move to this image now":
 { "navigate": "window-title.png" }
 ```
 
+## Try the first match that works
+
+JSON cannot have two `"click"` keys in one object. Put alternatives in an
+array. The runner tries them in order and **stops after the first success**:
+
+```json
+{
+  "try": [
+    { "click": "picture.png" },
+    { "click": "picture_2.png" }
+  ]
+}
+```
+
+If `picture.png` is found, `picture_2.png` is not used. If the first click
+fails, the second is tried. If every alternative fails, the workflow fails
+unless the try itself is marked not needed.
+
+```json
+{
+  "try": [
+    { "click": "ok.png" },
+    { "click": "continue.png" }
+  ],
+  "needed": false,
+  "else": "Neither OK nor Continue was on the screen"
+}
+```
+
+A try can wrap any steps, including `find`, `write`, and nested lists of
+actions.
+
+## Not-needed steps
+
+Some UI may or may not appear. Mark those steps so a missing image does not
+fail the workflow:
+
+```json
+{ "click": "cookie-banner.png", "needed": false }
+```
+
+```json
+{ "find": "hint.png", "optional": true }
+```
+
+`needed: false` and `optional: true` mean the same thing: run the step if the
+image is there, otherwise skip it and continue. Do not set both to
+conflicting values.
+
+Use `try` when you want one of several pictures. Use `needed: false` when
+the step is extra and skipping it is fine.
+
 ## Workflow-level messages
 
 `toast` and `else` can also sit next to `name` and `steps`:
@@ -694,7 +746,10 @@ A workflow `vars` object may override `desktop` or `home` if those folders
 live somewhere else. Names may contain letters, digits, and `_`, and must
 start with a letter or `_`.
 
-Unknown `{{names}}` are rejected when the JSON is loaded.
+`vars` belongs next to the workflow `name`, or on the `for` loop itself.
+Do not write `{{vars}}` or `{{steps}}` — those words are JSON keys. The
+placeholders are the names inside `vars` and the loop (`{{folder}}`,
+`{{n}}`, `{{desktop}}`).
 
 ## Loops
 
@@ -752,12 +807,24 @@ continues with the next value. Use this when some items may be missing.
 
 When `false` (default), the first failure stops the whole workflow.
 
-### `optional`
+### `optional` / `needed`
 
-On any normal step, `"optional": true` means that step may fail without
-stopping the workflow or the current loop iteration. The next step still
-runs. Prefer `skip_failed` on the loop when a failed item should also skip
-the following steps in that iteration.
+On any normal step or `try` block:
+
+```json
+"needed": false
+```
+
+```json
+"optional": true
+```
+
+These two forms are equivalent. The step runs if it can, and is skipped if
+the image is missing (or every `try` alternative fails). The next step still
+runs.
+
+Prefer `skip_failed` on a loop when a failed item should also skip the
+following steps in that same iteration.
 
 Loops can be nested. Inner loops see outer variables.
 
@@ -1082,8 +1149,8 @@ writing paths, key presses, hotkeys, scrolling, toast notifications, variables,
 runner does not yet provide dedicated properties for:
 
 - Dragging.
-- Conditional branches beyond `else` messages, `optional`, `skip_failed`, and
-  `navigate` on fail.
+- Conditional branches beyond `else` messages, `try`, `needed`/`optional`,
+  `skip_failed`, and `navigate` on fail.
 - Repeated automatic retries (navigate retries once).
 - Starting external programs.
 - Creating files on disk (`write` only types the path).
