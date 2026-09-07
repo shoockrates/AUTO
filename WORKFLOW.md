@@ -65,9 +65,14 @@ The recommended structure is an object containing a `workflows` array:
   "workflows": [
     {
       "name": "Open calendar",
+      "toast": "Calendar opened",
+      "else": "Could not open the calendar",
       "steps": [
         {
-          "click": "calendar/button.png"
+          "click": "calendar/button.png",
+          "navigate": "window-title.png",
+          "toast": "Clicked the calendar button",
+          "else": "Calendar button was not on the screen"
         }
       ]
     }
@@ -125,7 +130,8 @@ uses its compact layout.
 
 ## Image paths
 
-Every step needs an image, supplied by `move`, `click`, or `image`.
+Every step needs an image, supplied by `move`, `click`, `find`, `navigate`,
+or `image`.
 
 Images are normally stored under the `photos` directory beside `main.py`:
 
@@ -168,8 +174,8 @@ The easiest step format uses the action as the property name:
 { "click": "save.png", "wait_after": 1 }
 ```
 
-Use exactly one of `move` or `click`. All optional properties documented below
-can be added to this short form.
+Use exactly one of `move`, `click`, `find`, or `navigate`. All optional
+properties documented below can be added to this short form.
 
 The original expanded form remains supported:
 
@@ -180,10 +186,34 @@ The original expanded form remains supported:
 }
 ```
 
-Do not mix a short action such as `move`, `click`, `double_click`, or
-`right_click` with `image` or `action` in the same step.
+Do not mix a short action such as `move`, `click`, `double_click`,
+`right_click`, `find`, or `navigate` with `image` or `action` in the same step.
+
+`toast` and `else` can be added to any step. `navigate` can be added to an
+image step as an optional on-fail handle without counting as a second action.
 
 ## Available actions
+
+### Find an image without moving
+
+```json
+{ "find": "target.png" }
+```
+
+Use this to confirm you are on the right screen or that a control is visible.
+The step succeeds if the image is found and fails if it is not. The mouse is
+not moved and nothing is clicked or typed.
+
+```json
+{
+  "find": "home-title.png",
+  "toast": "Home screen is open",
+  "else": "Home screen was not visible"
+}
+```
+
+`find` supports the same optional properties as the other image actions,
+including `navigate` as an on-fail handle.
 
 ### Find an image and move
 
@@ -215,9 +245,22 @@ An optional `interval` controls the seconds between the two clicks:
 { "right_click": "target.png" }
 ```
 
-All four image actions support `delay`, `wait_after`, `confidence`, `region`,
-`distance`, `shape`, `next`, `step`, `grayscale`, `duration`, `dry_run`, and
-`verbose`.
+All five image actions (`find`, `move`, `click`, `double_click`, `right_click`)
+support `delay`, `wait_after`, `confidence`, `region`, `distance`, `shape`,
+`next`, `step`, `grayscale`, `duration`, `dry_run`, `verbose`, `toast`, `else`,
+and `navigate`. `duration` and `button` have no effect on `find`.
+
+### Navigate to an image
+
+```json
+{ "navigate": "target.png" }
+```
+
+`navigate` is an alias for `move`. Use it when you only want the cursor to go
+to the image.
+
+The same property is also an optional on-fail handle on another image action.
+See [`navigate` as a fallback](#navigate-as-a-fallback).
 
 ### Wait
 
@@ -234,14 +277,47 @@ the GUI's **Stop** button.
 { "type": "Hello world" }
 ```
 
+`type` uses layout-independent Unicode input by default. Text is entered
+exactly as written even when the active Windows layout is Lithuanian:
+
+```json
+{ "type": "524 įčė ąęšųūž" }
+```
+
+The example above types both the digits and Lithuanian characters correctly;
+it does not translate `524` into the Lithuanian number-row characters.
+
 Control the pause between characters with `interval`:
 
 ```json
 { "type": "Hello world", "interval": 0.05 }
 ```
 
-PyAutoGUI's text writer is intended for keyboard characters supported by the
-active keyboard layout.
+For an application that rejects Windows Unicode input and specifically needs
+physical key presses, select keyboard mode:
+
+```json
+{ "type": "abc", "type_mode": "keyboard" }
+```
+
+Keyboard mode follows the active keyboard layout, so number-row keys may
+produce Lithuanian characters. Supported `type_mode` values are `"unicode"`
+(default) and `"keyboard"`.
+
+### Write text (`write`)
+
+`write` is the same action as `type`. Use it when the text is a path or
+filename you want filled into a save dialog:
+
+```json
+{ "write": "{{folder}}/{{n}}.csv" }
+```
+
+This types the resolved text into the focused field. It does not create the
+file by itself; the application that owns the dialog still has to save.
+
+`{{desktop}}` and `{{home}}` are built in. Your own names come from `vars`
+and `for` loops. See [Variables](#variables) and [Loops](#loops).
 
 ### Press one key
 
@@ -274,8 +350,50 @@ Another example:
 Positive values scroll up and negative values scroll down. The exact physical
 distance depends on the operating system and application.
 
-Utility actions (`wait`, `type`, `press`, `hotkey`, and `scroll`) support
-`delay` and `wait_after`. `type` and `hotkey` also support `interval`.
+Utility actions (`wait`, `type`, `write`, `press`, `hotkey`, `scroll`, and
+`toast`) support `delay` and `wait_after`. `type`, `write`, and `hotkey` also
+support `interval`. All of them can include `toast`, `else`, and `optional`.
+
+### Toast message
+
+Show a corner notification. This can be a dedicated step:
+
+```json
+{ "toast": "Starting the import" }
+```
+
+Or a success message on any other step:
+
+```json
+{ "click": "save.png", "toast": "Saved" }
+```
+
+A dedicated toast step always succeeds and then displays the text. On an
+action step, `toast` appears only after that step succeeds.
+
+### `toast`
+
+- Type: string
+- Required: no, except when the step is a dedicated toast
+- Purpose: success notification text.
+
+```json
+"toast": "Clicked the screenshot"
+```
+
+### `else`
+
+- Type: string
+- Required: no
+- Purpose: failure notification text. Shown together with the technical reason
+  (missing image, unreadable file, fail-safe, and similar).
+
+```json
+"else": "Could not find the Save button"
+```
+
+If a step has no `else`, the workflow-level `else` is used. If that is also
+omitted, the toast shows only the technical error.
 
 ### `image`
 
@@ -290,9 +408,13 @@ Utility actions (`wait`, `type`, `press`, `hotkey`, and `scroll`) support
 ### `action`
 
 - Type: string
-- Values: `"move"`, `"click"`, or `"double_click"`
+- Values: `"find"`, `"move"`, `"click"`, or `"double_click"`
 - Default: `"click"`
-- Purpose: move the cursor to the detected image, optionally clicking it.
+- Purpose: verify the image, move to it, or click it.
+
+```json
+"action": "find"
+```
 
 ```json
 "action": "move"
@@ -454,7 +576,7 @@ Use a larger value for a slower visible movement:
 "button": "right"
 ```
 
-This setting is ignored when `action` is `"move"`.
+This setting is ignored when `action` is `"move"` or `"find"`.
 
 ### `dry_run`
 
@@ -479,6 +601,166 @@ The detailed output is printed in the terminal from which the GUI was started.
 "verbose": true
 ```
 
+## Navigate as a fallback
+
+`navigate` is optional on `find`, `move`, `click`, `double_click`, and
+`right_click`.
+It is **not** run on the success path. It is only used when the primary image
+is not found on screen.
+
+When that happens, the runner:
+
+1. Moves the cursor to the `navigate` handle image.
+2. Searches for the original image once more.
+3. Continues the workflow if the retry succeeds.
+4. Stops and shows the `else` toast if the handle or the retry fails.
+
+```json
+{
+  "click": "save.png",
+  "navigate": "window-title.png",
+  "toast": "Saved",
+  "else": "Save was not on the screen"
+}
+```
+
+Use a handle that is always visible, such as a window title, tab, or toolbar
+icon. Navigating there can reveal the original control or at least move the
+cursor to a known place before the retry.
+
+`navigate` is skipped when the primary image is found on the first try. It is
+also skipped for missing template files; those fail immediately because the
+screenshot is not available to search with.
+
+A standalone navigate step still means "move to this image now":
+
+```json
+{ "navigate": "window-title.png" }
+```
+
+## Workflow-level messages
+
+`toast` and `else` can also sit next to `name` and `steps`:
+
+```json
+{
+  "name": "Open and save",
+  "toast": "Finished opening and saving",
+  "else": "Open and save failed",
+  "steps": [
+    {
+      "click": "open.png",
+      "toast": "Opened"
+    },
+    {
+      "click": "save.png",
+      "else": "Could not find Save"
+    }
+  ]
+}
+```
+
+- Workflow `toast` appears after every step succeeds.
+- Step `else` is preferred over workflow `else` for the failing step.
+- Failure toasts always include the technical reason under the custom text.
+
+## Variables
+
+Put reusable text on the workflow with `vars`. Insert a value with
+`{{name}}` in image paths, typed text, toasts, and similar strings.
+
+```json
+{
+  "name": "Save export",
+  "vars": {
+    "folder": "{{desktop}}/data",
+    "name": "export"
+  },
+  "steps": [
+    {
+      "write": "{{folder}}/{{name}}.csv"
+    }
+  ]
+}
+```
+
+Built-in names:
+
+- `{{desktop}}` — the current user's Desktop folder
+- `{{home}}` — the user profile folder
+- `{{index}}` — 1-based position inside a `for` loop
+
+A workflow `vars` object may override `desktop` or `home` if those folders
+live somewhere else. Names may contain letters, digits, and `_`, and must
+start with a letter or `_`.
+
+Unknown `{{names}}` are rejected when the JSON is loaded.
+
+## Loops
+
+`for` repeats nested `steps` once per value, substituting `{{name}}` each
+time. Use it whenever the same actions would otherwise be copied 10, 31, or
+100 times. The loop is not tied to a calendar; a month-length range is only
+one way to produce the values.
+
+### Numeric range
+
+The usual form. `n` can be any name you want (`item`, `page`, `row`, …):
+
+```json
+{
+  "for": {
+    "n": { "from": 1, "to": 31 }
+  },
+  "skip_failed": true,
+  "steps": [
+    { "click": "item_{{n}}.png" },
+    { "write": "{{folder}}/{{n}}.csv" }
+  ]
+}
+```
+
+`step` is optional and defaults to `1`. `"pad": 2` turns `1` into `01` when
+screenshots or files use leading zeros.
+
+A `month` object is only a shortcut for “this many days in that month”
+(28–31). It is optional:
+
+```json
+{ "n": { "month": "2026_09", "pad": 2 } }
+```
+
+`month` accepts `2026_09` or `2026-09`.
+
+### Explicit list
+
+```json
+{
+  "for": {
+    "name": ["alpha", "beta", "gamma"]
+  },
+  "steps": [
+    { "write": "{{folder}}/{{name}}.csv" }
+  ]
+}
+```
+
+### `skip_failed`
+
+When `true`, a failed inner step skips the rest of that iteration and
+continues with the next value. Use this when some items may be missing.
+
+When `false` (default), the first failure stops the whole workflow.
+
+### `optional`
+
+On any normal step, `"optional": true` means that step may fail without
+stopping the workflow or the current loop iteration. The next step still
+runs. Prefer `skip_failed` on the loop when a failed item should also skip
+the following steps in that iteration.
+
+Loops can be nested. Inner loops see outer variables.
+
 ## Complete step
 
 This example shows every supported step property:
@@ -499,7 +781,11 @@ This example shows every supported step property:
   "duration": 0.2,
   "button": "left",
   "dry_run": false,
-  "verbose": false
+  "verbose": false,
+  "toast": "Clicked day 12",
+  "else": "Day 12 was not visible",
+  "navigate": "calendar/button.png",
+  "optional": false
 }
 ```
 
@@ -543,6 +829,25 @@ Each workflow becomes a separate button:
 }
 ```
 
+## Example: verify without clicking
+
+```json
+{
+  "workflows": [
+    {
+      "name": "Confirm home screen",
+      "steps": [
+        {
+          "find": "home-title.png",
+          "toast": "Home screen is open",
+          "else": "Home screen was not visible"
+        }
+      ]
+    }
+  ]
+}
+```
+
 ## Example: move without clicking
 
 ```json
@@ -562,6 +867,41 @@ Each workflow becomes a separate button:
   ]
 }
 ```
+
+## Example: repeat a sequence with a variable
+
+Same click and path-typing steps, 31 times, without copying the block:
+
+```json
+{
+  "name": "Export numbered items",
+  "vars": {
+    "folder": "{{desktop}}/data"
+  },
+  "toast": "Finished {{folder}}",
+  "steps": [
+    {
+      "for": {
+        "n": { "from": 1, "to": 31 }
+      },
+      "skip_failed": true,
+      "steps": [
+        {
+          "click": "item_{{n}}.png",
+          "else": "Item {{n}} was not visible"
+        },
+        {
+          "write": "{{folder}}/{{n}}.csv"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Change `from` / `to`, the image name, and the `write` string to match your
+other program. Use a list instead of a range when the values are names
+rather than numbers.
 
 ## Example: sequential clicks
 
@@ -584,6 +924,37 @@ Each workflow becomes a separate button:
         {
           "image": "close.png",
           "action": "click"
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Example: toasts and on-fail navigate
+
+```json
+{
+  "workflows": [
+    {
+      "name": "Open and save",
+      "toast": "Finished opening and saving",
+      "else": "Open and save failed",
+      "steps": [
+        {
+          "toast": "Looking for Open"
+        },
+        {
+          "click": "open.png",
+          "wait_after": 1.0,
+          "toast": "Opened",
+          "else": "Open was not on the screen"
+        },
+        {
+          "click": "save.png",
+          "navigate": "window-title.png",
+          "toast": "Saved",
+          "else": "Save was not on the screen"
         }
       ]
     }
@@ -647,6 +1018,9 @@ again and moves to the next occurrence:
   the next step or during `wait_after`.
 - **Minimize while running** keeps the launcher from covering
   images on the screen. The window is restored after completion or failure.
+- Corner **toast notifications** report success and failure even while the
+  launcher is minimized. Click a toast to dismiss it early. Toasts do not
+  steal keyboard or mouse focus from the target application.
 - The dark diagnostics panel is visible only when top-level `debug` is enabled.
 
 Only one workflow can run at a time. Workflow and reload buttons are disabled
@@ -661,22 +1035,34 @@ For each image step, the program:
 3. Captures the full screen or configured search area.
 4. Detects matching occurrences at or above `confidence`.
 5. Chooses the first or next occurrence.
-6. Moves the cursor to the center of the chosen match.
-7. Clicks when `action` is `"click"` and `dry_run` is `false`.
-8. Waits for `wait_after`.
-9. Continues to the next step.
+6. Leaves the mouse still when `action` is `"find"`.
+7. Moves the cursor to the match center for `"move"`, `"click"`, and
+   `"double_click"`.
+8. Clicks when `action` is `"click"` or `"double_click"` and `dry_run` is
+   `false`.
+9. Shows the step `toast` when one is set.
+10. Waits for `wait_after`.
+11. Continues to the next step.
 
-Utility steps run their keyboard, wait, or scroll action directly. Their
+If step 4 finds nothing and the step has `navigate`, the program moves to that
+handle image and repeats steps 3-7 once for the original template.
+
+Utility steps run their keyboard, wait, scroll, or toast action directly. Their
 optional `delay` runs first and `wait_after` runs afterward.
 
-If a step fails, the workflow stops immediately and the GUI displays the
-error. Common causes include:
+If a step fails, the workflow stops immediately. A red toast explains what
+failed: your `else` text when provided, plus the technical reason. Common
+causes include:
 
 - Image file missing or unreadable.
 - Image not visible in the selected search area.
 - Confidence set too high.
 - Template larger than the search area.
 - Invalid JSON or unsupported step property.
+- Navigate handle also not found after an on-fail recovery.
+
+Successful steps with `toast` show a green notification. Runtime failures no
+longer open a blocking error dialog; the toast and status line are enough.
 
 ## Safety
 
@@ -691,14 +1077,16 @@ matches.
 ## Currently unsupported workflow actions
 
 Workflow steps currently support image-based mouse actions, waiting, typing,
-key presses, hotkeys, and scrolling. The JSON runner does not yet provide
-dedicated properties for:
+writing paths, key presses, hotkeys, scrolling, toast notifications, variables,
+`for` loops, optional steps, and a single on-fail navigate retry. The JSON
+runner does not yet provide dedicated properties for:
 
 - Dragging.
-- Conditional branches.
-- Loops or repeat counts.
-- Automatic retries.
+- Conditional branches beyond `else` messages, `optional`, `skip_failed`, and
+  `navigate` on fail.
+- Repeated automatic retries (navigate retries once).
 - Starting external programs.
+- Creating files on disk (`write` only types the path).
 
 Those features would require additions to the workflow validator and runner in
 `main.py`.
