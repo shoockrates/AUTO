@@ -8,7 +8,7 @@
 
     "force_ocr": false,
 
-    "ocr_max_pages": 5,
+    "ocr_max_pages": 2,
 
     "ocr_dpi": 220,
 
@@ -16,9 +16,11 @@
 
     "ocr_out": false,
 
-    "max_workers": 1,
+    "max_workers": 2,
 
     "file_pick_mode": "ALL",
+
+    "auto_refresh_ms": 1000,
 
     "notifications": false
 
