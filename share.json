@@ -1,0 +1,101 @@
+{
+  "debug": "FALSE",
+  "workflows": [
+    {
+      "name": "Move to screenshot",
+      "steps": [
+        {
+          "click": "Screenshot_1.png"
+        },
+        {
+          "wait": 0.3
+        },
+	{"click": "Screenshot_6.png", "optional": true},
+
+	{
+          "wait": 0.3
+        },
+	{"click": "Screenshot_2.png"},
+	{
+          "wait": 1
+        },
+	{
+	"click": "Screenshot_3.png","optional": true
+
+        },
+	{
+          "wait": 0.3
+        },
+	{
+	"click": "Screenshot_4.png","optional": true
+
+        },
+	{
+          "wait": 0.3
+        },
+	{
+          "click": "Screenshot_5.png"
+
+        },
+	{
+          "wait": 0.5
+        },
+	{
+          "type": "301"
+        },
+	{
+	"try":[
+	{"click": "calendar\\Screenshot_1.png"},
+	{"click": "calendar\\Screenshot_1_1.png"}
+	]
+	},
+	{"wait": 0.4},
+		{"click": "Screenshot_15.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_16.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_17.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_18.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_19.png", "optional": true},
+		{"wait": 0.4},
+		{"press": "enter"},
+		{"wait": 0.4},
+		{"type":"C:\\Users\\skambuciai\\Desktop\\data\\2026_09\\1"},
+		{"wait": 0.4},
+		{"press": "enter"},
+		{"wait": 0.4},
+		{"click": "Screenshot_20.png"},
+		{"wait": 0.4},
+	{
+		"for": {"i": {"from": 2, "to": 31} },
+		"skip_failed": true,
+		"steps": [
+		{"click": "calendar\\Screenshot_{{i}}.png", "optional": true, "confidence": 0.95},
+		{"wait": 0.4},
+		{"click": "Screenshot_15.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_16.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_17.png"},
+		{"wait": 0.4},
+		{"click": "Screenshot_18.png"},
+		{"wait": 0.4},
+		{"press": "enter"},
+		{"wait": 0.4},
+		{"type": "{{i}}"},
+		{"wait": 0.4},
+		{"press": "enter"},
+		{"wait": 0.4},
+		{"click": "Screenshot_20.png"},
+		{"wait": 0.4}
+		]
+            },
+	{"wait": 0.5},
+	{"click": "Screenshot_46.png"}
+      ]
+    }
+  ]
+}
+
