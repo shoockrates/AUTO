@@ -22,7 +22,9 @@
 
     "auto_refresh_ms": 1000,
 
-    "notifications": false
+    "notifications": false,
+
+    "correct_proceed": true
 
   },
 
