@@ -26,12 +26,16 @@
             {
               "click": "arrow_left.png",
               "repeat": "{{months_back}}",
-              "when": "new_folder"
+              "when": "new_folder",
+              "confidence": 0.7,
+              "timeout": 8
             },
             {
               "click": "arrow_right.png",
               "repeat": "{{months_forward}}",
-              "when": "new_folder"
+              "when": "new_folder",
+              "confidence": 0.7,
+              "timeout": 8
             },
             {
               "try": [
@@ -50,10 +54,9 @@
             {"click": "Screenshot_16.png"},
             {"click": "Screenshot_17.png"},
             {"click": "Screenshot_18.png"},
-            {"click": "Screenshot_19.png", "optional": true, "when": "new_folder"},
+            {"click": "Screenshot_19.png", "optional": true, "when": "first"},
             {"press": "enter"},
-            {"type": "{{root}}\\{{month_folder}}\\{{day}}", "when": "new_folder"},
-            {"type": "{{day}}", "when": "same_folder"},
+            {"type": "{{root}}\\months\\{{file_name}}"},
             {"press": "enter"},
             {"click": "Screenshot_20.png"}
           ]
