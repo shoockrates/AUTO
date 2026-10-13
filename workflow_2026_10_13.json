@@ -1,0 +1,55 @@
+{
+  "debug": "FALSE",
+  "workflows": [
+    {
+      "name": "Move to screenshot",
+      "vars": {
+        "pace": 0.4,
+        "start": "month-1",
+        "end": "today",
+        "root": "{{desktop}}\\data"
+      },
+      "ask": ["start", "end", "pace"],
+      "steps": [
+        {"click": "Screenshot_1.png"},
+        {"click": "Screenshot_6.png", "optional": true},
+        {"click": "Screenshot_2.png"},
+        {"wait": 1},
+        {"click": "Screenshot_3.png", "optional": true},
+        {"click": "Screenshot_4.png", "optional": true},
+        {"click": "Screenshot_5.png"},
+        {"type": "301"},
+        {
+          "for": {"day": {"from": "{{start}}", "to": "{{end}}"}},
+          "skip_failed": true,
+          "steps": [
+            {
+              "try": [
+                {"click": "calendar\\Screenshot_{{day}}.png"},
+                {"click": "calendar\\Screenshot_{{day}}_1.png"}
+              ],
+              "when": "day_one"
+            },
+            {
+              "click": "calendar\\Screenshot_{{day}}.png",
+              "optional": true,
+              "confidence": 0.95,
+              "when": "other_day"
+            },
+            {"click": "Screenshot_15.png"},
+            {"click": "Screenshot_16.png"},
+            {"click": "Screenshot_17.png"},
+            {"click": "Screenshot_18.png"},
+            {"click": "Screenshot_19.png", "optional": true, "when": "new_folder"},
+            {"press": "enter"},
+            {"type": "{{root}}\\{{month_folder}}\\{{day}}", "when": "new_folder"},
+            {"type": "{{day}}", "when": "same_folder"},
+            {"press": "enter"},
+            {"click": "Screenshot_20.png"}
+          ]
+        },
+        {"click": "Screenshot_46.png"}
+      ]
+    }
+  ]
+}
