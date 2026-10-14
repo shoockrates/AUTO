@@ -24,20 +24,6 @@
           "skip_failed": true,
           "steps": [
             {
-              "click": "arrow_left.png",
-              "repeat": "{{months_back}}",
-              "when": "new_folder",
-              "confidence": 0.7,
-              "timeout": 8
-            },
-            {
-              "click": "arrow_right.png",
-              "repeat": "{{months_forward}}",
-              "when": "new_folder",
-              "confidence": 0.7,
-              "timeout": 8
-            },
-            {
               "try": [
                 {"click": "calendar\\Screenshot_{{day}}.png"},
                 {"click": "calendar\\Screenshot_{{day}}_1.png"}
